@@ -1,0 +1,38 @@
+思路：
+第一步：已经实现了按照不同文件大小实现不同的文件块大小，
+第二步：针对不同大小的文件块放置到不同设备(目录)上。
+
+
+
+----------------------------Hadoop 源代码分析（一三）
+package org.apache.hadoop.hdfs.protocol.datatransfer; Receiver 抽象类，实现了 DataTransferProtocol 接口
+里面有个 opWriteBlock(DataInputStream in) 函数是用来写文件的，
+package org.apache.hadoop.hdfs.server.datanode; DataXceiver  继承了Receiver 是用来在datanode端真正将文件写入磁盘的，采用了多线程，重写了writeBlock() 用来写入datanode的磁盘
+
+org.apache.hadoop.hdfs.protocol.ClientProtocol是用户端接口，其中的getBlockLocations()、addBlock()用来提交写入文件到hdfs上。
+
+----------------------------
+在block类中可以看到block的命名方式是：BLOCK_FILE_PREFIX + String.valueOf(blockId); 其中：String BLOCK_FILE_PREFIX = "blk_"; 
+Block是有java.io.File类变化而来的。
+
+----------------------------
+package org.apache.hadoop.hdfs.server.datanode.fsdataset.impl; FsDatasetImpl类，他实现了接口 FsDatasetSpi，此接口是DataNode 对底局存储的抽象。
+次类的方法：
+delBlockFromDisk：
+getMetaDataInputStream： 得刡一个 block 的元数据输入流。通过 block 的 ID，找对应的元数据文件，在上面打开输入流。
+finalizeBlock： 提交（或者叫：结束 finalize）通过 writeToBlock 打开的 block，这意味着写过程没有出错，可以正式把 Block 从 tmp 文件夹放到current 文件夹。
+----------------------------
+datastorage类中的writeAll函数用来想DN中的所有存储目录的current文件夹写入VERSION的版本内容。
+----------------------------
+datanode类继承实现了Configuration类，datanode为构造器里面需要参数conf，构造器里面读取conf文件中的配置，形如：DFSConfigKeys.DFS_PERMISSIONS_SUPERUSERGROUP_DEFAULT ；
+
+package org.apache.hadoop.hdfs;DFSConfigKeys类定义了所有配置及其默认值(看起来是这样的)，
+例如：   public static final String  DFS_DATANODE_DATA_DIR_KEY = "dfs.datanode.data.dir";
+
+----------------------------
+
+----------------------------
+
+----------------------------
+
+java类库Properties 里面的store函数是将 输出字节流转换成字符写流供store0函数实现真正的文件写入hashtable。
