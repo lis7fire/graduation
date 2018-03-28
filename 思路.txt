@@ -51,3 +51,106 @@ java类库Properties 里面的store函数是将 输出字节流转换成字符�
 
 ----------------------------
 
+FsVolumeList： (代表一个DataNode)保存本DN中多个存储目录，他持有多个 FsVolumeImpl对象，
+FsVolumeImpl： (代表一个存储目录)管理DN中一个存储目录下的所有数据块，由于一个存储目录可以存储多个块池的数据块，所以他持有本存储目录中的所有块池的BlockPoolSlice对象
+BlockPoolSlice：(代表一个块池)管理一个指定存储目录下的一个指定块池的所有数据块。包含磁盘空间的方法。
+
+-------------------------
+我的思路：
+FsVolumeImpl类保存的是单个目录，FsVolumeList保存的是本DN上所有目录。
+所以，看代码中 FsVolumeList.getNextVolume() 函数作用：把接收到的存储块放置到哪个目录中。里面具体调用函数blockChooser.chooseVolume(list, blockSize)来返回一个FsVolumeImpl对象来存放数据块。
+接下来看blockChooser是一个 interface VolumeChoosingPolicy<V extends FsVolumeSpi> 策略接口对象，具体的策略实现有两个：
+RoundRobinVolumeChoosingPolicy策略：轮询策略，轮询直到选择出第一个有足够空间的存储目录来存放数据块。
+AvailableSpaceVolumeChoosingPolicy策略：选择更多空间的存储目录来存放数据块。
+
+所以开发一种新的存储策略：即可实现我的毕业论文。
+
+在 FsDatasetImpl类的构造器中 ：DFSConfigKeys.DFS_DATANODE_FSDATASET_VOLUME_CHOOSING_POLICY_KEY 是表示配置策略的配置项。
+选择策略对应的配置项是：
+<property>  
+<name>dfs.datanode.fsdataset.volume.choosing.policy</name>  
+<value>org.apache.hadoop.hdfs.server.datanode.fsdataset.AvailableSpaceVolumeChoosingPolicy</value>  
+</property>  
+该参数默认值是RoundRobinVolumeChoosingPolicy。可以通过配置来使用AvailableSpaceVolumeChoosingPolicy策略
+
+对于 AvailableSpaceVolumeChoosingPolicy策略 意思是首先计算出两个值，一个是所有磁盘中最大可用空间，另外一个值是所有磁盘中最小可用空间，如果这两个值相差小于该配置项指定的阀值时，则就用轮询方式的磁盘选择策略选择磁盘存储数据副本。
+
+===================================
+DFSConfigKeys 保存所有的配置项。
+
+-----------------------------------------
+我们就从tmp 或 rbw 文件创建开始。
+1.参见java class BlockPoolSlice 类代码
+从类的描述中看出 BlockPoolSlice 是创建集群数据block的基础。
+此类中的   createTmpFile(Block b) 和 createRbwFile(Block b) 函数用来创建tmp文件。其具体功能是由：
+  DatanodeUtil.createTmpFile(b, f); 去产生的。在调用该方法创建数据block时，并没有我们关心的存储路径的选择策略。即：从BlockPoolSlice 类的create方法中向下查找，找不到存储路径的选择策略。
+于是思路转变：向上查找对其的调用：
+查看哪些地方调用了BlockPoolSlice.createRbwFile函数，找到了：FsVolumeImpl.createTmpFile()继续向上查找，找到了 FsDatasetImpl.createTemporary()函数中调用了： File f = v.createTmpFile(b.getBlockPoolId(), b.getLocalBlock());
+于是分析 FsDatasetImpl.createTemporary() 函数，该方法同样创建tmp文件。
+这里发现了我们关心的volumes，它是配置的存储路径。他是在FsDatasetImpl的构造器中初始化的： volumes = new FsVolumeList(volsFailed, blockChooserImpl); 
+也就是知道了FsVolumeList是用来保存所有存储路径的。
+
+================================https://www.2cto.com/kf/201601/486157.html==============
+现有HDFS磁盘选择策略的不足
+OK,我们已经了解了HDFS目前存在的2种磁盘选择策略,我们看看HDFS在使用这些策略的是不是就是完美的呢,答案显然不是,下面是我总结出的2点不足之处.
+
+1.HDFS的默认磁盘选择策略是RoundRobinVolumeChoosingPolicy,而不是更优的AvailableSpaceVolumeChoosingPolicy,我猜测的原因估计是AvailableSpaceVolumeChoosingPolicy是后来才有的,但是默认值的选择没有改,依然是老的策略.
+
+2.磁盘选择策略考虑的因素过于单一,磁盘可用空间只是其中1个因素,其实还有别的指标比如这个块目前的IO情况,如果正在执行许多读写操作的时候,我们当然希望找没有进行任何操作的磁盘进行数据写入,否则只会更加影响当前磁盘的写入速度,这个维度也是下面我自定义的新的磁盘选择策略的1个根本需求点.
+
+自定义磁盘选择策略之ReferenceCountVolumeChoosingPolicy
+新的磁盘选择策略的根本依赖点在于ReferenceCount,引用计数,他能让你了解有多少对象正在操作你,引用计数在很多地方都有用到,比如jvm中通过引用计数,判断是否进行垃圾回收.在磁盘相关类FsVolume中也有类似的1个变量,刚好可以满足我们的需求,如下:
+源码位置：https://github.com/linyiqun/open-source-patch/tree/master/hdfs/others/HDFS-volumeChoosingPolicy
+
+
+=================
+hadoop中的日志输出：LOG.info("Loged By ZhangHang: ");
+LOG.info("Adding block pool " + bpid); //INFO org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetImpl 前缀输出
+FsDatasetImpl.LOG.info("Scanning block pool " + bpid + " on volume " + v + "...");//前面是哪个类，日志文件中就写哪个类。
+
+
+===================================
+package org.apache.hadoop.hdfs; DFSClient中的内部类Conf初始化读取hdfs-site.xml中的配置项。
+==================
+我的论文最后修改位置：
+
+E:\我的科研\tmp\hadoop-2.6.0-src\hadoop-hdfs-project\hadoop-hdfs\src\main\java\org\apache\hadoop\hdfs\DFSConfigKeys.java ：添加：	public static final long DFS_BLOCK_SIZE_ORDINARY = 32 * 1024 * 1024;
+
+E:\我的科研\hadoop-2.6.0-src-xiugai/hadoop-hdfs-project/hadoop-hdfs/src/main/java/org/apache/hadoop/hdfs/server/datanode/fsdataset/RoundRobinVolumeChoosingPolicy.java ：
+
+int volumesNums = volumes.size();
+
+	// Add By ZhangHang---start
+	LOG.info("Loged By ZhangHang: blockSize =" + blockSize);
+	if (blockSize < DFS_BLOCK_SIZE_ORDINARY) {// 这里判断
+		final V nvmVolume = volumes.get(volumesNums - 1);// 最后一个作为NVM设备
+		LOG.info("Loged By ZhangHang: volumesNums =" + volumesNums);
+		LOG.info("Loged By ZhangHang: rootPath =" + nvmVolume.getBasePath());
+		LOG.info("Loged By ZhangHang: StorageType =" + nvmVolume.getStorageType());
+		LOG.info("Loged By ZhangHang: keyongkongjian =" + nvmVolume.getAvailable());
+		LOG.info("Loged By ZhangHang: BlockPoolList =" + nvmVolume.getBlockPoolList());
+		return nvmVolume;
+	}
+	// Add By ZhangHang---end
+
+
+使用方法：
+1、xml配置项中配置：通过设置源码中的 DFSConfigKeys.DFS_DATANODE_FSDATASET_VOLUME_CHOOSING_POLICY_KEY 作为配置项的key，类名作为配置项的value
+<property>
+<name>dfs.datanode.fsdataset.volume.choosing.policy</name>  
+<value>org.apache.hadoop.hdfs.server.datanode.fsdataset.AvailableSpaceVolumeChoosingPolicy</value>  
+</property>
+2、在dfs.datanode.data.dir 配置项中至少要配置两个路径，最后一个路径是NVM的路径。
+
+=====================================================================
+
+编译hadoop时，将下载好的apache-tomcat-6.0.41.tar.gz文件放到下面两个路径就不需要下载了很慢：
+/root/hadoop-2.6.0-src/hadoop-common-project/hadoop-kms/downloads/apache-tomcat-6.0.41.tar.gz
+/root/hadoop-2.6.0-src/hadoop-hdfs-project/hadoop-hdfs-httpfs/downloads/apache-tomcat-6.0.41.tar.gz
+
+192.168.56.101
+
+=====================================================================
+Hadoop-common 项目的 org.apache.hadoop.fs.FsShell 类中保存用户端的输入。
+ org.apache.hadoop.fs.shell.Command 类保存用户输入的具体命令类。
+
